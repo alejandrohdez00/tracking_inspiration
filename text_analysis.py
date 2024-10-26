@@ -2,19 +2,16 @@ import warnings
 warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`:50256 for open-end generation.")
 import pandas as pd
 import os
-import glob
 from sentence_transformers import SentenceTransformer
-import numpy as np
 import matplotlib.pyplot as plt
-from transformers import GPT2Tokenizer
 import torch
 from utils import get_device, ensure_dir
-from data_processing import load_metadata, process_and_embed_texts
 from analysis import compute_similarity
 import argparse
 import sys
 import gc
 from openai import OpenAI
+import re
 
 # Function definitions will go here
 
@@ -30,15 +27,97 @@ def process_raw_text(file_path):
     start = content.find("*** START OF")
     end = content.find("*** END OF")
     if start != -1 and end != -1:
-        return content[start:end].strip()
+        content = content[start:end].strip()
     
     content = '\n'.join(line for line in content.split('\n') if not line.strip().startswith('_'))
     return content
 
-def embed_sentences(text, model):
-    """Embed sentences using the provided model."""
-    sentences = text.split('.')
-    return model.encode(sentences)
+def split_into_sentences(text):
+    """
+    Split text into sentences while preserving honorifics, abbreviations, and handling edge cases.
+    Returns a list of cleaned sentences.
+    """
+    # Common abbreviations and titles that include periods
+    abbreviations = {
+        # Titles
+        'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.', 'Sr.', 'Jr.', 'Rev.',
+        # Business
+        'Ltd.', 'Co.', 'Corp.', 'Inc.', 'LLC.',
+        # Locations
+        'St.', 'Ave.', 'Blvd.', 'Rd.', 'Apt.',
+        # Common abbreviations
+        'etc.', 'i.e.', 'e.g.', 'vs.', 'viz.', 'al.',
+        # Academic
+        'Ph.D.', 'B.A.', 'M.A.', 'D.D.S.',
+        # Geography
+        'U.S.A.', 'U.K.', 'E.U.',
+        # Time
+        'a.m.', 'p.m.',
+        # Add more as needed
+    }
+    
+    # Sort abbreviations by length (longest first) to avoid partial matches
+    sorted_abbreviations = sorted(abbreviations, key=len, reverse=True)
+    
+    # Replace periods in abbreviations with a unique marker
+    # Using a marker unlikely to appear in normal text
+    marker = '<!PERIOD!>'
+    text_copy = text
+    
+    # Replace periods in abbreviations
+    for abbr in sorted_abbreviations:
+        # Use word boundary to avoid matching partial words
+        pattern = r'\b' + re.escape(abbr)
+        text_copy = re.sub(pattern, abbr.replace('.', marker), text_copy)
+    
+    # Handle decimal numbers
+    text_copy = re.sub(r'(\d+)\.(\d+)', r'\1' + marker + r'\2', text_copy)
+    
+    # Handle ellipsis
+    text_copy = text_copy.replace('...', '<!ELLIPSIS!>')
+    
+    # Split on sentence boundaries
+    # Looking for:
+    # 1. Period, exclamation mark, or question mark
+    # 2. Followed by space or newline
+    # 3. Followed by capital letter or number
+    sentence_boundaries = r'(?<=[.!?])(?=\s+(?:[A-Z]|\d))|(?<=[.!?])(?=\n)|(?<=[.!?])(?=\s*$)'
+    
+    sentences = re.split(sentence_boundaries, text_copy)
+    
+    # Clean up sentences
+    cleaned_sentences = []
+    for sentence in sentences:
+        # Restore periods in abbreviations
+        sentence = sentence.replace(marker, '.')
+        # Restore ellipsis
+        sentence = sentence.replace('<!ELLIPSIS!>', '...')
+        # Remove extra whitespace
+        sentence = ' '.join(sentence.split())
+        
+        if sentence.strip():
+            cleaned_sentences.append(sentence.strip())
+    
+    # Additional validation to merge incomplete sentences
+    merged_sentences = []
+    current_sentence = ''
+    
+    for sentence in cleaned_sentences:
+        current_sentence = current_sentence + ' ' + sentence if current_sentence else sentence
+        
+        # Check if this forms a complete sentence
+        # A complete sentence should either:
+        # 1. End with terminal punctuation
+        # 2. Or be followed by a sentence starting with a capital letter
+        if re.search(r'[.!?]$', current_sentence.strip()):
+            merged_sentences.append(current_sentence.strip())
+            current_sentence = ''
+    
+    # Add any remaining content
+    if current_sentence.strip():
+        merged_sentences.append(current_sentence.strip())
+    
+    return merged_sentences
 
 def process_and_embed_texts(metadata, raw_dir, model, device):
     sys.stderr.write("Starting process_and_embed_texts...\n")
@@ -48,8 +127,7 @@ def process_and_embed_texts(metadata, raw_dir, model, device):
         file_path = os.path.join(raw_dir, f"{row['id']}_raw.txt")
         if os.path.exists(file_path):
             text = process_raw_text(file_path)
-            sentences = [s.strip() for s in text.split('.') if s.strip()]
-            sys.stderr.write(f"Sentences {sentences}")
+            sentences = split_into_sentences(text)
             sys.stderr.write(f"Embedding {len(sentences)} sentences...\n")
             embeddings = model.encode(sentences, device=device)
             embedded_data.append({
@@ -62,12 +140,12 @@ def process_and_embed_texts(metadata, raw_dir, model, device):
     sys.stderr.write("Finished process_and_embed_texts.\n")
     return embedded_data
 
-def generate_plot(author, api_key):
+
+def generate_plot(author):
     sys.stderr.write(f"Generating plot for author: {author}\n")
     
     client = OpenAI(
-    # This is the default and can be omitted
-    api_key=os.environ.get("OPENAI_API_KEY"),
+        api_key=os.environ.get("OPENAI_API_KEY"),
     )
     prompt = f"Write a chapter of a new book that {author} could have written"
     
@@ -86,10 +164,12 @@ def generate_plot(author, api_key):
     sys.stderr.write(f"Plot generated: {plot}\n")
     return plot
 
-def generate_and_embed_plot(author, sentence_model, api_key, device):
+def generate_and_embed_plot(author, sentence_model, device):
     sys.stderr.write(f"Generating and embedding plot for author: {author}\n")
-    plot = generate_plot(author, api_key)
-    plot_embeddings = sentence_model.encode(plot.split('.'), device=device)
+    plot = generate_plot(author)  # Removed api_key parameter since it's not used in generate_plot
+    # Use the new split_into_sentences function instead of simple split
+    sentences = split_into_sentences(plot)
+    plot_embeddings = sentence_model.encode(sentences, device=device)
     return plot, plot_embeddings
 
 
@@ -193,7 +273,7 @@ def main(author, api_key):
     gc.collect()
 
     # Store both plot and embeddings
-    generated_plot, plot_embeddings = generate_and_embed_plot(author, sentence_model, api_key, device)
+    generated_plot, plot_embeddings = generate_and_embed_plot(author, sentence_model, device)
     
     # Add some validation prints
     sys.stderr.write(f"Generated plot sentences: {len(generated_plot.split('.'))}\n")

@@ -5,8 +5,6 @@
 #SBATCH --mem 16G
 #SBATCH --partition gpu
 #SBATCH --gres gpu:a100:1
-#SBATCH --mail-type end
-#SBATCH --mail-user hernandezartiles@mpib-berlin.mpg.de
 
 module purge
 module load anaconda/3/2023.03
