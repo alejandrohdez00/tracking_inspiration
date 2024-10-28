@@ -17,12 +17,23 @@ from sklearn.metrics.pairwise import cosine_similarity
 from nltk.tokenize import word_tokenize
 from nltk.util import ngrams
 import nltk
-from scipy.stats import entropy
 import re
+import random
+
+
+def set_seeds(seed=42):
+    """Set seeds for reproducibility."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def load_metadata(file_path):
     """Load metadata from CSV file."""
     return pd.read_csv(file_path)
+
 
 def process_raw_text(file_path):
     """Process raw text file, removing non-book content."""
@@ -130,13 +141,31 @@ def get_context_window(sentences, embeddings, index, window_size=3):
     
     context_text = ' '.join(sentences[start:end])
     
-    if isinstance(embeddings, list):
-        embeddings = [torch.tensor(emb) if not torch.is_tensor(emb) else emb 
-                     for emb in embeddings[start:end]]
-    else:
-        embeddings = embeddings[start:end]
+    # Get the window of embeddings
+    window_embeddings = embeddings[start:end]
     
-    context_embedding = torch.mean(torch.stack(embeddings), dim=0)
+    # Convert embeddings to tensors if they're numpy arrays
+    if isinstance(window_embeddings, np.ndarray):
+        # If it's a 2D numpy array, convert the whole array
+        window_embeddings = torch.from_numpy(window_embeddings)
+    elif isinstance(window_embeddings, list):
+        # If it's a list of numpy arrays or tensors, convert each element
+        window_embeddings = [
+            emb if isinstance(emb, torch.Tensor) else torch.from_numpy(emb)
+            for emb in window_embeddings
+        ]
+        # Stack the tensors
+        window_embeddings = torch.stack(window_embeddings)
+    
+    # Check if embeddings are empty
+    if isinstance(window_embeddings, list) and len(window_embeddings) == 0:
+        raise ValueError("No embeddings found for the specified index range.")
+    
+    # Calculate mean embedding
+    if isinstance(window_embeddings, list):
+        context_embedding = torch.mean(torch.stack(window_embeddings), dim=0)
+    else:
+        context_embedding = torch.mean(window_embeddings, dim=0)
     
     return context_text, context_embedding
 
@@ -256,7 +285,7 @@ def analyze_similarity(data, generated_plot, plot_embeddings):
     return analyzed_data
 
 def process_and_embed_texts(metadata, raw_dir, model, device, cache_dir):
-    """Process and embed texts with caching support."""
+    """Process and embed texts with proper tensor conversion."""
     sys.stderr.write("Starting process_and_embed_texts...\n")
     embedded_data = []
     
@@ -265,36 +294,36 @@ def process_and_embed_texts(metadata, raw_dir, model, device, cache_dir):
         file_path = os.path.join(raw_dir, f"{row['id']}_raw.txt")
         
         if os.path.exists(file_path):
-            # Read the text content
             text = process_raw_text(file_path)
-            
-            # Generate cache key
             cache_key = generate_cache_key(text, model.get_sentence_embedding_dimension())
-            
-            # Try to load from cache
             cached_data = load_from_cache(cache_key, cache_dir)
             
             if cached_data is not None:
                 sys.stderr.write(f"Loading embeddings from cache for {row['title']}\n")
+                # Convert cached embeddings to tensors if needed
+                embeddings = cached_data['embeddings']
+                if isinstance(embeddings, list) and isinstance(embeddings[0], np.ndarray):
+                    embeddings = [torch.from_numpy(emb) for emb in embeddings]
+                
                 embedded_data.append({
                     'id': row['id'],
                     'title': row['title'],
                     'author': row['author'],
-                    'embeddings': cached_data['embeddings'],
+                    'embeddings': embeddings,
                     'original_sentences': cached_data['original_sentences']
                 })
                 continue
             
-            # If not in cache, compute embeddings
             sys.stderr.write(f"Computing new embeddings for {row['title']}\n")
             sentences = split_into_sentences(text)
+            
+            set_seeds()
             embeddings = model.encode(sentences, device=device)
             
             # Convert numpy arrays to torch tensors
-            if not isinstance(embeddings, torch.Tensor):
+            if isinstance(embeddings, np.ndarray):
                 embeddings = [torch.from_numpy(emb) for emb in embeddings]
             
-            # Save to cache
             cache_data = {
                 'embeddings': embeddings,
                 'original_sentences': sentences
@@ -309,7 +338,6 @@ def process_and_embed_texts(metadata, raw_dir, model, device, cache_dir):
                 'original_sentences': sentences
             })
             
-            # Clear CUDA memory after processing each book
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
@@ -341,47 +369,203 @@ def generate_plot(author):
     return plot
 
 def generate_and_embed_plot(author, sentence_model, device):
+    """Generate and embed plot with proper tensor conversion."""
     sys.stderr.write(f"Generating and embedding plot for author: {author}\n")
-    plot = generate_plot(author)  # Removed api_key parameter since it's not used in generate_plot
-    # Use the new split_into_sentences function instead of simple split
+    plot = generate_plot(author)
     sentences = split_into_sentences(plot)
+    set_seeds()
+    
+    # Get embeddings and convert to tensor
     plot_embeddings = sentence_model.encode(sentences, device=device)
+    if isinstance(plot_embeddings, np.ndarray):
+        plot_embeddings = torch.from_numpy(plot_embeddings)
+    
     return plot, plot_embeddings
 
 def visualize_results(analyzed_data, output_dir):
-    """Create visualizations of similarity analysis results."""
-    # Embedding similarity distribution
-    plt.figure(figsize=(10, 6))
+    """Create interactive visualizations of similarity analysis results using Plotly."""
+    import plotly.graph_objects as go
+    import plotly.figure_factory as ff
+    from plotly.subplots import make_subplots
+    import numpy as np
+    
+    # 1. Embedding similarity distribution
+    fig_dist = go.Figure()
+    
     for item in analyzed_data:
         scores = [sim['similarity_score'] for sim in item['embedding_similarities']]
-        plt.hist(scores, alpha=0.5, label=item['title'], bins=20)
+        fig_dist.add_trace(go.Histogram(
+            x=scores,
+            name=item['title'],
+            opacity=0.7,
+            nbinsx=20,
+            hovertemplate=(
+                "Similarity Score: %{x:.3f}<br>" +
+                "Count: %{y}<br>" +
+                "<extra></extra>"
+            )
+        ))
     
-    plt.title("Distribution of Embedding Similarities")
-    plt.xlabel("Similarity Score")
-    plt.ylabel("Frequency")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, "embedding_similarities.png"))
-    plt.close()
+    fig_dist.update_layout(
+        title="Distribution of Embedding Similarities",
+        xaxis_title="Similarity Score",
+        yaxis_title="Frequency",
+        barmode='overlay',
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=1.05,
+        ),
+        margin=dict(r=300),
+        height=600,
+        width=1000,
+        template='plotly_white',
+        hovermode='x unified'
+    )
     
-    # Style metrics comparison
+    fig_dist.write_html(os.path.join(output_dir, "embedding_similarities.html"))
+    
+    # 2. Style metrics comparison
     metrics = list(analyzed_data[0]['style_metrics']['differences'].keys())
-    values = []
+    fig_box = go.Figure()
     
-    for item in analyzed_data:
-        values.append([item['style_metrics']['differences'][metric] for metric in metrics])
+    for metric in metrics:
+        values = [item['style_metrics']['differences'][metric] for item in analyzed_data]
+        fig_box.add_trace(go.Box(
+            y=values,
+            name=metric,
+            boxpoints='all',
+            jitter=0.3,
+            pointpos=-1.8,
+            hovertemplate=(
+                "Metric: %{x}<br>" +
+                "Value: %{y:.3f}<br>" +
+                "<extra></extra>"
+            )
+        ))
     
-    plt.figure(figsize=(10, 6))
-    plt.boxplot(values, labels=metrics)
-    plt.title("Style Metric Differences")
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "style_metrics.png"))
-    plt.close()
+    fig_box.update_layout(
+        title="Style Metric Differences",
+        yaxis_title="Difference Value",
+        template='plotly_white',
+        height=600,
+        width=1000,
+        showlegend=False,
+        boxmode='group'
+    )
+    
+    fig_box.write_html(os.path.join(output_dir, "style_metrics.html"))
+    
+    # 3. Fixed heatmap of similarity scores
+    # Prepare data for heatmap
+    titles = [item['title'] for item in analyzed_data]
+    max_length = max(len(item['embedding_similarities']) for item in analyzed_data)
+    
+    # Create a matrix of similarity scores
+    similarity_matrix = np.zeros((len(analyzed_data), max_length))
+    similarity_matrix.fill(np.nan)  # Fill with NaN initially
+    
+    for i, item in enumerate(analyzed_data):
+        similarities = [sim['similarity_score'] for sim in item['embedding_similarities']]
+        similarity_matrix[i, :len(similarities)] = similarities
+    
+    # Create heatmap
+    fig_heat = go.Figure(data=go.Heatmap(
+        z=similarity_matrix,
+        y=titles,
+        colorscale='Viridis',
+        connectgaps=False,  # Don't connect gaps in data
+        hoverongaps=False,
+        hovertemplate=(
+            "Position: %{x}<br>" +
+            "Title: %{y}<br>" +
+            "Similarity: %{z:.3f}<br>" +
+            "<extra></extra>"
+        )
+    ))
+    
+    fig_heat.update_layout(
+        title="Similarity Scores Heatmap",
+        xaxis_title="Position in Generated Text",
+        yaxis_title="Original Text",
+        height=max(400, len(analyzed_data) * 50),
+        width=1000,
+        template='plotly_white',
+        xaxis=dict(
+            tickmode='array',
+            ticktext=[f'{i*10}%' for i in range(11)],
+            tickvals=[i * (max_length-1)/10 for i in range(11)]
+        )
+    )
+    
+    fig_heat.write_html(os.path.join(output_dir, "similarity_heatmap.html"))
+    
+    # Create index.html
+    index_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Text Analysis Visualizations</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .viz-link { 
+                display: block; 
+                margin: 10px 0; 
+                padding: 10px; 
+                background-color: #f0f0f0;
+                text-decoration: none;
+                color: #333;
+                border-radius: 5px;
+            }
+            .viz-link:hover { background-color: #e0e0e0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Text Analysis Visualizations</h1>
+            <a class="viz-link" href="embedding_similarities.html">Embedding Similarities Distribution</a>
+            <a class="viz-link" href="style_metrics.html">Style Metrics Comparison</a>
+            <a class="viz-link" href="similarity_heatmap.html">Similarity Scores Heatmap</a>
+        </div>
+    </body>
+    </html>
+    """
+    
+    with open(os.path.join(output_dir, "index.html"), 'w') as f:
+        f.write(index_html)
 
 def generate_report(analyzed_data, output_dir):
-    """Generate a detailed analysis report."""
+    """Generate a detailed analysis report including cross-book comparisons."""
     report = "Text Similarity Analysis Report\n" + "="*80 + "\n\n"
     
+    # First, collect all similarities across all books
+    all_similarities = []
+    for item in analyzed_data:
+        for sim in item['embedding_similarities']:
+            all_similarities.append({
+                'book_title': item['title'],
+                'similarity_score': sim['similarity_score'],
+                'generated_context': sim['generated_context'],
+                'original_context': sim['original_context']
+            })
+    
+    # Print top 5 similarities across all books
+    report += "Top 5 Most Similar Passages Across All Books\n" + "-"*80 + "\n"
+    top_cross_book = sorted(all_similarities, key=lambda x: x['similarity_score'], reverse=True)[:5]
+    
+    for i, sim in enumerate(top_cross_book, 1):
+        report += f"\n{i}. Similarity Score: {sim['similarity_score']:.4f}\n"
+        report += f"From Book: {sim['book_title']}\n"
+        report += f"Generated: {sim['generated_context']}\n"
+        report += f"Original: {sim['original_context']}\n"
+        report += "-"*40 + "\n"
+    
+    report += "\n" + "="*80 + "\n\n"
+    
+    # Then proceed with per-book analysis
     for item in analyzed_data:
         report += f"Analysis for: {item['title']}\n" + "-"*80 + "\n"
         
@@ -397,8 +581,8 @@ def generate_report(analyzed_data, output_dir):
         for metric, diff in item['style_metrics']['differences'].items():
             report += f"{metric}: {diff:.4f} difference\n"
         
-        # Most similar passages
-        report += "\nMost Similar Passages:\n"
+        # Most similar passages for this book
+        report += "\nMost Similar Passages in This Book:\n"
         top_similarities = sorted(
             item['embedding_similarities'],
             key=lambda x: x['similarity_score'],
@@ -413,6 +597,14 @@ def generate_report(analyzed_data, output_dir):
         
         report += "\n" + "="*80 + "\n"
     
+    # Add summary statistics across all books
+    all_scores = [sim['similarity_score'] for sim in all_similarities]
+    report += "\nOverall Statistics Across All Books\n" + "-"*80 + "\n"
+    report += f"Average similarity across all books: {np.mean(all_scores):.4f}\n"
+    report += f"Maximum similarity found: {np.max(all_scores):.4f}\n"
+    report += f"Minimum similarity found: {np.min(all_scores):.4f}\n"
+    report += f"Standard deviation of similarities: {np.std(all_scores):.4f}\n"
+    
     with open(os.path.join(output_dir, "analysis_report.txt"), 'w', encoding='utf-8') as f:
         f.write(report)
 
@@ -421,6 +613,8 @@ def main(author, api_key):
     Main function with improved analysis pipeline.
     """
     sys.stderr.write(f"Starting enhanced analysis for author: {author}\n")
+
+    set_seeds()
     
     # Setup remains the same
     metadata_file = "metadata/metadata.csv"
@@ -442,8 +636,10 @@ def main(author, api_key):
         sys.stderr.write(f"No books found for author: {author}\n")
         return
     
+    cache_dir = get_cache_path(output_dir)
+
     # Process and embed texts
-    embedded_data = process_and_embed_texts(author_metadata, raw_dir, sentence_model, device)
+    embedded_data = process_and_embed_texts(author_metadata, raw_dir, sentence_model, device, cache_dir)
     
     # Generate and embed new plot
     generated_plot, plot_embeddings = generate_and_embed_plot(author, sentence_model, device)
@@ -461,3 +657,4 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     main(args.author, args.api_key)
+
