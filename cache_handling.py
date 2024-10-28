@@ -1,7 +1,7 @@
 import os
 import pickle
 import hashlib
-import datetime
+from datetime import datetime
 import sys
 
 def get_cache_path(output_dir):
