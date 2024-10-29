@@ -351,7 +351,7 @@ def generate_plot(author):
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
     )
-    prompt = f"Write a chapter of a new book that {author} could have written"
+    prompt = f"Write a plot for of a new book that {author} could have written"
     
     response = client.chat.completions.create(
         model="gpt-4-0125-preview",
@@ -502,7 +502,71 @@ def visualize_results(analyzed_data, output_dir):
     
     fig_heat.write_html(os.path.join(output_dir, "similarity_heatmap.html"))
     
-    # Create index.html
+    # 4. New line plot for top 10 most similar books
+    # Calculate mean similarity for each book
+    book_mean_similarities = []
+    for item in analyzed_data:
+        mean_sim = np.mean([sim['similarity_score'] for sim in item['embedding_similarities']])
+        book_mean_similarities.append({
+            'title': item['title'],
+            'mean_similarity': mean_sim,
+            'similarities': [sim['similarity_score'] for sim in item['embedding_similarities']]
+        })
+    
+    # Sort and get top 10 books
+    top_10_books = sorted(book_mean_similarities, 
+                         key=lambda x: x['mean_similarity'], 
+                         reverse=True)[:10]
+    
+    # Create line plot
+    fig_lines = go.Figure()
+    
+    # Define a color scale for 10 distinct colors
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+              '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    
+    for idx, book in enumerate(top_10_books):
+        # Create x-axis positions as percentages
+        x_positions = np.linspace(0, 100, len(book['similarities']))
+        
+        fig_lines.add_trace(go.Scatter(
+            x=x_positions,
+            y=book['similarities'],
+            mode='lines',
+            name=f"{book['title']} (mean: {book['mean_similarity']:.3f})",
+            line=dict(color=colors[idx], width=2),
+            hovertemplate=(
+                "Position: %{x:.1f}%<br>" +
+                "Similarity: %{y:.3f}<br>" +
+                "<extra></extra>"
+            )
+        ))
+    
+    fig_lines.update_layout(
+        title="Similarity Scores Across Generated Text for Top 10 Most Similar Books",
+        xaxis_title="Position in Generated Text (%)",
+        yaxis_title="Similarity Score",
+        height=600,
+        width=1000,
+        template='plotly_white',
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=-0.2,
+            xanchor="center",
+            x=0.5,
+            orientation="h"
+        ),
+        margin=dict(b=150),  # Increase bottom margin for legend
+        hovermode='x unified'
+    )
+    
+    fig_lines.update_xaxes(range=[0, 100])
+    fig_lines.update_yaxes(range=[0, 1])
+    
+    fig_lines.write_html(os.path.join(output_dir, "top_books_similarity_lines.html"))
+    
+    # Update index.html to include the new visualization
     index_html = """
     <!DOCTYPE html>
     <html>
@@ -529,6 +593,7 @@ def visualize_results(analyzed_data, output_dir):
             <a class="viz-link" href="embedding_similarities.html">Embedding Similarities Distribution</a>
             <a class="viz-link" href="style_metrics.html">Style Metrics Comparison</a>
             <a class="viz-link" href="similarity_heatmap.html">Similarity Scores Heatmap</a>
+            <a class="viz-link" href="top_books_similarity_lines.html">Top 10 Books Similarity Lines</a>
         </div>
     </body>
     </html>
@@ -536,6 +601,178 @@ def visualize_results(analyzed_data, output_dir):
     
     with open(os.path.join(output_dir, "index.html"), 'w') as f:
         f.write(index_html)
+
+
+def create_position_similarity_arcs(analyzed_data, output_dir):
+    """Create an interactive visualization showing position relationships between texts."""
+    import plotly.graph_objects as go
+    import numpy as np
+    import os
+    
+    # Calculate mean similarity for each book to get top 10
+    book_mean_similarities = []
+    for item in analyzed_data:
+        mean_sim = np.mean([sim['similarity_score'] for sim in item['embedding_similarities']])
+        book_mean_similarities.append({
+            'title': item['title'],
+            'mean_similarity': mean_sim,
+            'similarities': item['embedding_similarities']
+        })
+    
+    top_10_books = sorted(book_mean_similarities, 
+                         key=lambda x: x['mean_similarity'], 
+                         reverse=True)[:10]
+    
+    # Define colors for books
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+              '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+    
+    # Create figure with secondary y-axis
+    fig = go.Figure()
+    
+    # Add arcs for each book
+    for book_idx, book in enumerate(top_10_books):
+        book_color = colors[book_idx]
+        
+        for sim in book['similarities']:
+            # Calculate positions as percentages
+            gen_pos = sim['original_index'] / len(book['similarities']) * 100
+            orig_pos = sim['original_index'] / len(book['similarities']) * 100
+            similarity = sim['similarity_score']
+            
+            # Create arc path
+            num_points = 50
+            t = np.linspace(0, np.pi, num_points)
+            
+            # Calculate arc height based on distance between points
+            height = abs(gen_pos - orig_pos) * 0.15
+            
+            # Generate arc points
+            x = np.linspace(gen_pos, orig_pos, num_points)
+            y = height * np.sin(t)
+            
+            # Add trace for this arc
+            fig.add_trace(go.Scatter(
+                x=x,
+                y=y,
+                mode='lines',
+                line=dict(
+                    color=book_color,
+                    width=1
+                ),
+                opacity=similarity,  # Moved opacity to trace level
+                name=book['title'],
+                showlegend=False,
+                hovertemplate=(
+                    f"Book: {book['title']}<br>" +
+                    "Generated Text Position: %{customdata[0]:.1f}%<br>" +
+                    "Original Text Position: %{customdata[1]:.1f}%<br>" +
+                    "Similarity Score: %{customdata[2]:.3f}<br>" +
+                    "<extra></extra>"
+                ),
+                customdata=[[gen_pos, orig_pos, similarity]] * num_points
+            ))
+    
+    # Add reference lines for generated and original text
+    fig.add_shape(
+        type="line",
+        x0=0, x1=100,
+        y0=-0.1, y1=-0.1,
+        line=dict(color="black", width=2),
+    )
+    fig.add_shape(
+        type="line",
+        x0=0, x1=100,
+        y0=0.1, y1=0.1,
+        line=dict(color="black", width=2),
+    )
+    
+    # Add legend for books
+    for book_idx, book in enumerate(top_10_books):
+        fig.add_trace(go.Scatter(
+            x=[None],
+            y=[None],
+            mode='lines',
+            line=dict(color=colors[book_idx], width=2),
+            name=f"{book['title']} (mean: {book['mean_similarity']:.3f})"
+        ))
+    
+    # Update layout
+    fig.update_layout(
+        title="Position Relationships Between Generated and Original Texts",
+        xaxis_title="Position in Text (%)",
+        height=800,
+        width=1200,
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=-0.1,
+            xanchor="center",
+            x=0.5,
+            orientation="h"
+        ),
+        margin=dict(b=150),
+        yaxis=dict(
+            showticklabels=False,
+            zeroline=False,
+            range=[-0.5, 0.5]
+        ),
+        annotations=[
+            dict(
+                x=-5, y=0.1,
+                xref="x", yref="y",
+                text="Generated Text",
+                showarrow=False
+            ),
+            dict(
+                x=-5, y=-0.1,
+                xref="x", yref="y",
+                text="Original Text",
+                showarrow=False
+            )
+        ]
+    )
+    
+    # Save visualization
+    fig.write_html(os.path.join(output_dir, "position_relationships.html"))
+    
+    # Update index.html
+    index_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Text Analysis Visualizations</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .container { max-width: 800px; margin: 0 auto; }
+            .viz-link { 
+                display: block; 
+                margin: 10px 0; 
+                padding: 10px; 
+                background-color: #f0f0f0;
+                text-decoration: none;
+                color: #333;
+                border-radius: 5px;
+            }
+            .viz-link:hover { background-color: #e0e0e0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Text Analysis Visualizations</h1>
+            <a class="viz-link" href="embedding_similarities.html">Embedding Similarities Distribution</a>
+            <a class="viz-link" href="style_metrics.html">Style Metrics Comparison</a>
+            <a class="viz-link" href="similarity_heatmap.html">Similarity Scores Heatmap</a>
+            <a class="viz-link" href="top_books_similarity_lines.html">Top 10 Books Similarity Lines</a>
+            <a class="viz-link" href="position_relationships.html">Position Relationships</a>
+        </div>
+    </body>
+    </html>
+    """
+    
+    with open(os.path.join(output_dir, "index.html"), 'w') as f:
+        f.write(index_html)
+
 
 def generate_report(analyzed_data, output_dir):
     """Generate a detailed analysis report including cross-book comparisons."""
@@ -648,6 +885,7 @@ def main(author, api_key):
     sys.stderr.write("Performing contextual similarity analysis...\n")
     analyzed_data = analyze_similarity(embedded_data, generated_plot, plot_embeddings)
     visualize_results(analyzed_data, output_dir)
+    create_position_similarity_arcs(analyzed_data, output_dir)
     generate_report(analyzed_data, output_dir)
 
 if __name__ == "__main__":
