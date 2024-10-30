@@ -1,3 +1,18 @@
+<<<<<<< HEAD
+# Tracking-Inspiration Project
+
+This project is a fork of the Standardized Project Gutenberg Corpus (SPGC), aiming to analyze inspiration patterns in language models using the SPGC dataset. 
+
+## Data Download Instructions
+
+1. Clone this repository:
+```bash
+git clone https://github.com/[your-username]/tracking-inspiration.git
+cd tracking-inspiration
+```
+
+2. Install dependencies:
+=======
 # Standardized Project Gutenberg Corpus
 Easily generate a local, up-to-date copy of the Standardized Project Gutenberg Corpus (SPGC).
 
@@ -31,10 +46,24 @@ cd gutenberg
 
 To install any missing dependencies, just run
 
+>>>>>>> 706c76c2e5ce02fe1de002618b1f587740ebcdf5
 ```bash
 pip install -r requirements.txt
 ```
 
+<<<<<<< HEAD
+3. Download Project Gutenberg data:
+```bash
+python get_data.py
+```
+
+4. Process the downloaded data:
+```bash
+python process_data.py
+```
+
+Note: The data download will only fetch missing files if you already have some data, making it easy to keep your dataset up-to-date by running `get_data.py` periodically.
+=======
 ## Getting the data
 To get a local copy of the PG data, just run
 ```
@@ -54,3 +83,4 @@ This will fill in the `text/`, `tokens/` and `counts/` folders.
 
 
 
+>>>>>>> 706c76c2e5ce02fe1de002618b1f587740ebcdf5
